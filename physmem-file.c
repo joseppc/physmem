@@ -38,6 +38,18 @@
 
 #define MAX_HUGEPAGES 128
 
+/* make hugepage_info 128 bytes long */
+#define FILENAME_PATH_MAX 96
+
+struct hugepage_info {
+	struct block *block; /* the block this hugepage belongs to */
+	void *va; /* virtual address this hugepage is mapped to */
+	uint64_t pa; /* the physical address of this hugepage */
+	uint32_t size; /* size of hugepage */
+	int fd; /* the fd returned by open, for the hugepages file */
+	char filename[FILENAME_PATH_MAX];
+};
+
 typedef LIST_HEAD(block_list, block) block_list_t;
 
 struct block_data {
@@ -666,7 +678,7 @@ static void print_block_list(block_list_t *list, int pages)
 	}
 }
 
-void block_dump(block_type type, int pages)
+void block_dump(block_type_t type, int pages)
 {
 	const char *type_str;
 	block_list_t *list;

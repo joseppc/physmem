@@ -4,23 +4,11 @@
 #include <sys/queue.h>
 #include <stdint.h>
 
-/* make hugepage_info 128 bytes long */
-#define FILENAME_PATH_MAX 96
-
-struct hugepage_info {
-	struct block *block; /* the block this hugepage belongs to */
-	void *va; /* virtual address this hugepage is mapped to */
-	uint64_t pa; /* the physical address of this hugepage */
-	uint32_t size; /* size of hugepage */
-	int fd; /* the fd returned by open, for the hugepages file */
-	char filename[FILENAME_PATH_MAX];
-};
-
 typedef enum {
 	BLOCK_EMPTY = 0,
 	BLOCK_AVAIL,
 	BLOCK_USED
-} block_type;
+} block_type_t;
 
 /* a block is a chunk of physically contiguous memory that can be
  * made of one or more huge pages
@@ -35,7 +23,7 @@ struct block {
 	uint32_t count; /* number of hugepages in this block */
 	uint32_t hp_size; /* the size of the hugepages */
 	uint32_t id; /* internal ID of this block, debug purposes */
-	block_type type;
+	block_type_t type;
 };
 
 struct block *block_alloc(uint64_t);
@@ -46,6 +34,6 @@ int block_map(struct block *block, void *addr);
 int block_unmap(struct block *block);
 
 /* if pages is not 0, it will print the pages associated to each block */
-void block_dump(block_type, int pages);
+void block_dump(block_type_t, int pages);
 
 #endif
