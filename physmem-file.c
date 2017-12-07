@@ -424,40 +424,6 @@ void block_free(struct block *block)
 	unlock_list();
 }
 
-#ifdef ENABLE_DEBUG
-
-static void dump_hp_array(struct hugepage_info *hp, int size)
-{
-	while (size--) {
-		printf("%03d:"
-		       " VA: 0x%016" PRIx64
-		       " PA: 0x%016" PRIx64
-		       "\n",
-		       hp->fd,
-		       hp->va,
-		       hp->pa);
-		hp++;
-	}
-}
-
-static void dump_blocks(void)
-{
-	unsigned int count = 0;
-	struct block *block;
-
-	while (count < block_data.count) {
-		block = &block_data.block[count++];
-
-		printf("Block %" PRIu32 "\n", block->id);
-		printf("\tSize: %" PRIu64 " MB\n", block->size / (1 MB));
-		printf("\tVA start: 0x%016" PRIx64 "\n", block->va);
-		printf("\tPA start: 0x%016" PRIx64 "\n", block->pa);
-		printf("\tcount: %u hugepages\n", block->count);
-	}
-}
-
-#endif /* ENABLE_DEBUG */
-
 static int map_block(struct block *block)
 {
 	void *addr;
@@ -596,6 +562,15 @@ static int check_va_area(const void *va, uint64_t size, uint64_t page_size)
 	return 0;
 }
 
+static void init_blocks(void)
+{
+	memset(&block_data, 0, sizeof(block_data));
+
+	LIST_INIT(&block_data.avail);
+	LIST_INIT(&block_data.used);
+	LIST_INIT(&block_data.empty);
+}
+
 static void do_atexit(void)
 {
 	for (int i = 0; i < MAX_HUGEPAGES; ++i) {
@@ -604,15 +579,6 @@ static void do_atexit(void)
 		close(pages[i].fd);
 		unlink(pages[i].filename);
 	}
-}
-
-static void init_blocks(void)
-{
-	memset(&block_data, 0, sizeof(block_data));
-
-	LIST_INIT(&block_data.avail);
-	LIST_INIT(&block_data.used);
-	LIST_INIT(&block_data.empty);
 }
 
 int block_module_init(void)
@@ -628,26 +594,6 @@ int block_module_init(void)
 		return -1;
 
 	return 0;
-}
-
-static int check_block(const struct block *block)
-{
-	struct hugepage_info *first, *last;
-	int ret = 0;
-
-	first = &pages[block->first];
-	last = &pages[block->first + block->count - 1];
-	if (first->block != block) {
-		ret = 1;
-		printf("\tfirst block does not match, got %u\n",
-			first->block->id);
-	}
-	if (last->block != block) {
-		ret = 1;
-		printf("\tlast block does not match, got %u\n",
-			last->block->id);
-	}
-	return ret;
 }
 
 static int test_alloc(void)
@@ -681,7 +627,38 @@ static int test_free(void)
 	return 0;
 }
 
-static void print_block_list(block_list_t *list)
+/*** DEBUG ***/
+
+static int check_block(const struct block *block)
+{
+	struct hugepage_info *first, *last;
+	int ret = 0;
+
+	first = &pages[block->first];
+	last = &pages[block->first + block->count - 1];
+	if (first->block != block) {
+		ret = 1;
+		printf("\tfirst block does not match, got %u\n",
+			first->block->id);
+	}
+	if (last->block != block) {
+		ret = 1;
+		printf("\tlast block does not match, got %u\n",
+			last->block->id);
+	}
+	return ret;
+}
+
+static void print_pages(struct block *block)
+{
+	for (uint32_t i = 0; i < block->count; ++i) {
+		struct hugepage_info *hp = &pages[block->first + i];
+		printf("\t%03d: VA: 0x%016" PRIx64 " PA: 0x%016" PRIx64 "\n",
+		       hp->fd, hp->va, hp->pa);
+	}
+}
+
+static void print_block_list(block_list_t *list, int pages)
 {
 	struct block *block;
 
@@ -692,38 +669,35 @@ static void print_block_list(block_list_t *list)
 		printf("\tPA start: 0x%016" PRIx64 "\n", block->pa);
 		printf("\tHP start: %u-%u\n", block->first, block->first + block->count - 1);
 		printf("\tcount: %u hugepages\n", block->count);
+		if (pages)
+			print_pages(block);
 	}
 }
 
-int main(void)
+void block_dump(block_type type, int pages)
 {
-	if (block_module_init() != 0)
-		exit(EXIT_FAILURE);
+	const char *type_str;
+	block_list_t *list;
 
-#ifdef ENABLE_DEBUG
-	dump_blocks();
-#endif
+	switch (type) {
+	case BLOCK_EMPTY:
+		type_str = "EMPTY\n";
+		list = &block_data.empty;
+		break;
+	case BLOCK_AVAIL:
+		type_str = "AVAIL\n";
+		list = &block_data.avail;
+		break;
+	case BLOCK_USED:
+		type_str = "USED\n";
+		list = &block_data.used;
+		break;
+	default:
+		return;
+	}
 
-	test_alloc();
+	printf(type_str);
 
-	printf("AVAIL:\n");
-	print_block_list(&block_data.avail);
-
-	printf("USED:\n");
-	print_block_list(&block_data.used);
-
-	printf("-----------\n");
-
-	sleep(2);
-	test_free();
-	printf("-----------\n");
-	printf("AVAIL:\n");
-	print_block_list(&block_data.avail);
-
-	printf("USED:\n");
-	print_block_list(&block_data.used);
-
-
-	exit(EXIT_SUCCESS);
+	print_block_list(list, pages);
 }
 
