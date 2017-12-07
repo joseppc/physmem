@@ -16,6 +16,8 @@
 #include <inttypes.h>
 #include <limits.h>
 
+#include "physmem-file.h"
+
 #define KB * 1024ULL
 #define MB * 1024ULL KB
 #define GB * 1024ULL MB
@@ -35,43 +37,9 @@
 #define HUGEPAGES_PATH "/dev/hugepages/"
 #define PHYS_ADDR_INVALID ((uint64_t)-1)
 
-typedef enum {
-	BLOCK_EMPTY = 0,
-	BLOCK_AVAIL,
-	BLOCK_USED
-} block_type;
-
 /* must be on a huge page boundary */
 #define VIRTUAL_PHYSICAL_ANCHOR (16 TB)
 static uint64_t anchor_addr = VIRTUAL_PHYSICAL_ANCHOR;
-
-/* make hugepage_info 128 bytes long */
-#define FILENAME_PATH_MAX 96
-
-struct hugepage_info {
-	struct block *block; /* the block this hugepage belongs to */
-	void *va; /* virtual address this hugepage is mapped to */
-	uint64_t pa; /* the Physical Address of this hugepage */
-	uint32_t size; /* size of hugepage, probably redundant */
-	int fd; /* the fd returned by open, for the hugepages file */
-	char filename[FILENAME_PATH_MAX];
-};
-
-/* a block is a chunk of physically contiguous memory that can be
- * made of one or more huge pages
- * */
-struct block {
-	LIST_ENTRY(block) next;
-	void *va; /* virtual address where the block is mapped */
-	uint64_t pa; /* physical address where it starts */
-	uint64_t size; /* the size of this memory block */
-	uint32_t first; /* index of first hugepage belonging to this block
-			 * in pages[] */
-	uint32_t count; /* number of hugepages in this block */
-	uint32_t hp_size; /* the size of the hugepages */
-	uint32_t id; /* internal ID of this block, debug purposes */
-	block_type type;
-};
 
 #define MAX_HUGEPAGES 128
 
@@ -267,9 +235,11 @@ static int sort_in_blocks(struct hugepage_info *hp_array, int count)
 
 		block_data.count++;
 
-		printf("New block %d\n", block->id);
-		printf("\t%03d: VA: %016" PRIx64 ", PA: %016" PRIx64 "\n",
-		       hp->fd, hp->va, hp->pa);
+#ifdef DEBUG_PRINT
+		fprintf(stderr, "New block %d\n", block->id);
+		fprintf(stderr, "\t%03d: VA: %016" PRIx64
+			", PA: %016" PRIx64 "\n", hp->fd, hp->va, hp->pa);
+#endif
 
 		pa_expected = block->pa + hp->size;
 
@@ -281,16 +251,20 @@ static int sort_in_blocks(struct hugepage_info *hp_array, int count)
 			if (hp->pa != pa_expected)
 				break;
 
-			printf("\t%03d: VA: %016" PRIx64 ", "
-			       "PA: %016" PRIx64 "\n",
-			       hp->fd, hp->va, hp->pa);
+#ifdef DEBUG_PRINT
+			fprintf(stderr, "\t%03d: VA: %016" PRIx64 ", "
+				"PA: %016" PRIx64 "\n", hp->fd, hp->va, hp->pa);
+#endif
 
 			block->count++;
 			block->size += hp->size;
 
 			pa_expected += hp->size;
 		}
-		printf("\tSize: %" PRIu64 " MB\n", (block->size / (1 MB)));
+#ifdef DEBUG_PRINT
+		fprintf(stderr, "\tSize: %" PRIu64 " MB\n",
+			(block->size / (1 MB)));
+#endif
 	} while (hp_id < count);
 
 	qsort(block_data.block, block_data.count, sizeof(block_data.block[0]),
@@ -335,7 +309,7 @@ static struct block *block_get(void)
 	return block;
 }
 
-static const struct block *block_alloc(uint64_t size)
+struct block *block_alloc(uint64_t size)
 {
 	int i;
 	struct block *block;
@@ -416,17 +390,14 @@ static const struct block *block_alloc(uint64_t size)
 	return ret;
 }
 
-static void block_free(struct block *block)
+void block_free(struct block *block)
 {
-	if (block == NULL) {
-		printf("B is null\n");
+	if (block == NULL)
 		return;
-	}
 
 	lock_list();
 
 	LIST_REMOVE(block, next);
-	printf("Block %u removed from list\n", block->id);
 
 	/* append this block to left block if available */
 	if (block->first != 0) {
@@ -456,7 +427,6 @@ static void block_free(struct block *block)
 
 			block = left_block;
 			LIST_REMOVE(block, next);
-			printf("Block %u removed from list\n", block->id);
 		}
 	}
 
@@ -505,10 +475,8 @@ static void block_free(struct block *block)
 			}
 			last = tmp;
 		}
-		if (last != NULL) {
-			printf("inserting last %u\n", block->id);
+		if (last != NULL)
 			LIST_INSERT_AFTER(last, block, next);
-		}
 	}
 
 	unlock_list();
