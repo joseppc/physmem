@@ -36,10 +36,6 @@
 
 #define HUGEPAGES_PATH "/dev/hugepages/"
 
-/* must be on a huge page boundary */
-#define VIRTUAL_PHYSICAL_ANCHOR (16 TB)
-static uint64_t anchor_addr = VIRTUAL_PHYSICAL_ANCHOR;
-
 #define MAX_HUGEPAGES 128
 
 typedef LIST_HEAD(block_list, block) block_list_t;
@@ -424,104 +420,132 @@ void block_free(struct block *block)
 	unlock_list();
 }
 
-static int map_block(struct block *block)
+int block_map(struct block *block, void *anchor_addr)
 {
 	void *addr;
-	void *next = NULL;
+	int retval;
+	int mapped_cnt;
 	struct hugepage_info *hp;
-	size_t page_size;
 
-	if (block == NULL)
-		return -1;
+	if (block == NULL || anchor_addr == NULL)
+		return -EINVAL;
 
-	/* find a place in VA space for this block */
-	addr = (void *)anchor_addr;
-	addr = mmap(addr, block->size,
+	/* make sure we can actually map this memory region */
+	addr = mmap(anchor_addr, block->size,
 		    PROT_READ | PROT_WRITE,
 		    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
 		    -1, 0);
 
-	if (addr == MAP_FAILED) {
-		perror("mmap");
-		return -1;
-	}
+	if (addr == MAP_FAILED)
+		return errno;
 
-	/* leave one hugepage gap */
-	anchor_addr += block->size + block->hp_size;
-	/* FIXME: check upper boundary */
-
-	hp = &pages[block->first];
-	page_size = hp->size;
 	block->va = addr;
+	mapped_cnt = 0;
 
+#ifdef ENABLE_DEBUG
 	fprintf(stderr, "Mapping block %d at %p\n", block->id, block->va);
+#endif
 
-	while (hp != NULL) {
-		if (munmap(addr, hp->size) != 0) {
-			perror("munmap");
-			fprintf(stderr, "Handle this error....\n");
-			exit(EXIT_FAILURE);
+	for (uint32_t i = 0; i < block->count; ++i) {
+		void *tmp;
+
+		hp = &pages[block->first + i];
+
+		if ((hp->va != NULL) && (munmap(hp->va, hp->size) != 0)) {
+#ifdef ENABLE_DEBUG
+			fprintf(stderr, "Error unmapping old va: %p\n", hp->va);
+#endif
+			retval = -EINVAL;
+			goto exit_failure;
 		}
 
-		void *tmp;
+		if (munmap(addr, hp->size) != 0) {
+			retval = errno;
+			goto exit_failure;
+		}
 
 		tmp = mmap(addr, hp->size,
 			   PROT_READ | PROT_WRITE,
 			   MAP_SHARED | MAP_FIXED,
 			   hp->fd, 0);
 		if (tmp == MAP_FAILED) {
+			retval = errno;
 			perror("mmap");
 			fprintf(stderr, "Error remapping PA:0x%" PRIu64 " to %p\n",
 				hp->pa, tmp);
-			exit(EXIT_FAILURE);
+			goto exit_failure;
 		}
 
+		mapped_cnt++;
+
+#ifdef ENABLE_MAP_CHECKS
+		/* check: we poison the page with the file descriptor number */
 		int fd = *((int *)tmp);
 		if (fd != hp->fd) {
 			fprintf(stderr, "Mismatch!\n");
-			exit(EXIT_FAILURE);
+			goto exit_failure;
 		}
 
 		uint64_t pa = get_phys_addr(tmp);
 		if (pa != hp->pa) {
-			fprintf(stderr, "Remapping hp %d (fd old: %d) "
-				"(fd new: %d) failed?\n",
-				hp->fd, fd, *((int *)hp->va));
-			fprintf(stderr, "PA orig: 0x%016" PRIx64 "\n"
-				"PA  new: 0x%016" PRIx64 "\n", hp->pa, pa);
+			retval = -EFAULT;
+			fprintf(stderr, "Physicall address error, PA orig: "
+				"0x%016" PRIx64 "\nPA  new: 0x%016" PRIx64 "\n",
+				hp->pa, pa);
+			goto exit_failure;
 		}
+#endif
 
+#ifdef ENABLE_DEBUG
 		fprintf(stderr, "\t%03d: VA: 0x%016" PRIx64 " -> 0x%016" PRIx64
 			", PA: 0x%016" PRIx64 "\n",
 			hp->fd, hp->va, tmp, hp->pa);
+#endif
 
-		if (munmap(hp->va, page_size) != 0) {
-			munmap(tmp, page_size);
-			perror("munmap");
-			fprintf(stderr, "Error unmapping hp->va: %p\n", hp->va);
-			exit(EXIT_FAILURE);
-		}
+		/* finally unmap wherever we had the file mapped to */
 
 		hp->va = addr;
 
 		addr = (void *)((char *)addr + hp->size);
-		hp++;
 	}
 
 	return 0;
+
+exit_failure:
+
+	while (mapped_cnt--) {
+		hp = &pages[block->first + mapped_cnt];
+		munmap(hp->va, hp->size);
+		hp->va = NULL;
+	}
+	block->va = NULL;
+
+	return -1;
 }
 
-/* this is just to demonstrate that we can actually write to the blocks
- * contiguously mapped
- */
+int block_unmap(struct block *block)
+{
+	struct hugepage_info *hp;
+	int ret = 0;
+
+	if (block == NULL || block->va == NULL)
+		return -EINVAL;
+
+	hp = &pages[block->first];
+	for (uint32_t i = 0; i < block->count; ++i, ++hp) {
+		*((int *)hp->va) = hp->fd;
+		if (munmap(hp->va, hp->size))
+			ret = errno;
+	}
+
+	return ret;
+}
+
 static void zero_block(struct block *block)
 {
 	if (block == NULL || block->va == NULL)
 		return;
 
-	/* if this works... */
-	printf("Zeroing out block %d, size %lu MB\n",
-	       block->id, block->size / (1 MB));
 	memset(block->va, 0, block->size);
 }
 

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <sys/queue.h>
 #include <inttypes.h>
+#include <string.h>
 
 #include "physmem-file.h"
 
@@ -10,6 +11,10 @@
 #define MB * 1024ULL KB
 #define GB * 1024ULL MB
 #define TB * 1024ULL GB
+
+/* must be on a huge page boundary */
+#define VIRTUAL_PHYSICAL_ANCHOR (16 TB)
+static uint64_t anchor_addr = VIRTUAL_PHYSICAL_ANCHOR;
 
 struct entry {
 	LIST_ENTRY(entry) entries;
@@ -60,8 +65,31 @@ static int test_free(void)
 	return 0;
 }
 
+static int test_map_unmap(void)
+{
+	struct entry *entry;
+	int ret;
+
+	entry = LIST_FIRST(&head);
+	if (!entry)
+		return -1;
+
+	ret = block_map(entry->block, (void *)anchor_addr);
+	if (ret)
+		return ret;
+
+	ret = *(int *)(entry->block->va);
+	printf("Poison: %d\n", ret);
+
+	memset(entry->block->va, 0, entry->block->size);
+
+	return block_unmap(entry->block);
+}
+
 int main(void)
 {
+	int ret;
+
 	if (block_module_init()) {
 		fprintf(stderr, "Could not initialize modue\n");
 		exit(EXIT_FAILURE);
@@ -76,6 +104,13 @@ int main(void)
 
 	block_dump(BLOCK_USED, 0);
 	block_dump(BLOCK_AVAIL, 0);
+
+	printf("-----\nMAPPING\n----\n");
+	ret = test_map_unmap();
+	if (ret) {
+		fprintf(stderr, "Failed to map: %d\n", ret);
+	}
+
 
 	printf("-----\nFREEING\n----\n");
 	test_free();

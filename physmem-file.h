@@ -42,6 +42,8 @@ struct block *block_alloc(uint64_t);
 void block_free(struct block *);
 int block_module_init(void);
 int block_check(const struct block *);
+int block_map(struct block *block, void *addr);
+int block_unmap(struct block *block);
 
 /* if pages is not 0, it will print the pages associated to each block */
 void block_dump(block_type, int pages);
