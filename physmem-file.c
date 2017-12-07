@@ -525,43 +525,6 @@ static void zero_block(struct block *block)
 	memset(block->va, 0, block->size);
 }
 
-/* this checks */
-static int check_va_area(const void *va, uint64_t size, uint64_t page_size)
-{
-	uint64_t pa;
-	uint64_t expected_pa;
-	uint64_t offset;
-
-	pa = get_phys_addr(va);
-	if (pa == PHYS_ADDR_INVALID)
-		return -1;
-	printf("VA: %016" PRIx64 " -> PA: %016" PRIx64 "\n", va, pa);
-
-
-	expected_pa = pa + page_size;
-	offset = page_size;
-	while (offset < size) {
-		va = (void *)((char *)va + offset);
-		pa = get_phys_addr(va);
-
-		if (pa == PHYS_ADDR_INVALID)
-			return -1;
-
-		printf("VA: %016" PRIx64 " -> PA: %016" PRIx64 "\n", va, pa);
-
-		if (pa != expected_pa) {
-			fprintf(stderr,
-				"ERRROR: not expected PA %016" PRIx64 "...\n",
-				expected_pa);
-			return -1;
-		}
-
-		expected_pa += page_size;
-	}
-
-	return 0;
-}
-
 static void init_blocks(void)
 {
 	memset(&block_data, 0, sizeof(block_data));
@@ -596,40 +559,45 @@ int block_module_init(void)
 	return 0;
 }
 
-static int test_alloc(void)
-{
-	const struct block *block;
-	uint64_t size = 1 MB;
-
-	block = block_alloc(size);
-	while (block != NULL) {
-		printf("-- Allocated block %d, count: %" PRIu32 "\n",
-			block->id, block->count);
-		if (check_block(block)) {
-			printf("Error: check failed\n");
-			break;
-		}
-		size += 1 MB;
-		block = block_alloc(size);
-	}
-	printf("Failed to allocate block for size %" PRIu32 "MB\n",
-		size / (1 MB));
-	return 0;
-}
-
-static int test_free(void)
-{
-	while (!LIST_EMPTY(&block_data.used)) {
-		struct block *b = LIST_FIRST(&block_data.used);
-		block_free(b);
-	}
-
-	return 0;
-}
-
 /*** DEBUG ***/
 
-static int check_block(const struct block *block)
+/* this makes sure the VA area is also physically contiguous */
+static int check_va_area(const void *va, uint64_t size, uint64_t page_size)
+{
+	uint64_t pa;
+	uint64_t expected_pa;
+	uint64_t offset;
+
+	pa = get_phys_addr(va);
+	if (pa == PHYS_ADDR_INVALID)
+		return -1;
+	printf("VA: %016" PRIx64 " -> PA: %016" PRIx64 "\n", va, pa);
+
+	expected_pa = pa + page_size;
+	offset = page_size;
+	while (offset < size) {
+		va = (void *)((char *)va + offset);
+		pa = get_phys_addr(va);
+
+		if (pa == PHYS_ADDR_INVALID)
+			return -1;
+
+		printf("VA: %016" PRIx64 " -> PA: %016" PRIx64 "\n", va, pa);
+
+		if (pa != expected_pa) {
+			fprintf(stderr,
+				"ERRROR: not expected PA %016" PRIx64 "...\n",
+				expected_pa);
+			return -1;
+		}
+
+		expected_pa += page_size;
+	}
+
+	return 0;
+}
+
+int block_check(const struct block *block)
 {
 	struct hugepage_info *first, *last;
 	int ret = 0;
