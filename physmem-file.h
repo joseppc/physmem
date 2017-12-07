@@ -38,8 +38,8 @@ struct block {
 	block_type type;
 };
 
-struct block *block_alloc(uint64_t size);
-void block_free(struct block *b);
-
+struct block *block_alloc(uint64_t);
+void block_free(struct block *);
+int block_module_init(void);
 
 #endif

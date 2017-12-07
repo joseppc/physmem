@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <limits.h>
 
+#include "get_phys_addr.h"
 #include "physmem-file.h"
 
 #define KB * 1024ULL
@@ -33,9 +34,7 @@
 #define lock_list()
 #define unlock_list()
 
-#define PAGEMAP_FILE "/proc/self/pagemap"
 #define HUGEPAGES_PATH "/dev/hugepages/"
-#define PHYS_ADDR_INVALID ((uint64_t)-1)
 
 /* must be on a huge page boundary */
 #define VIRTUAL_PHYSICAL_ANCHOR (16 TB)
@@ -56,63 +55,6 @@ struct block_data {
 
 static struct hugepage_info pages[MAX_HUGEPAGES];
 static struct block_data block_data;
-
-/*
- * Get physical address from virtual address addr.
- * Function taken from DPDK, (c) Intel Corp, BSD-3 license
- */
-static uint64_t get_phys_addr(const void *addr)
-{
-	unsigned int page_sz;
-	int fd;
-	off_t offset;
-	int  read_bytes;
-	uint64_t page;
-	uint64_t phys_addr;
-
-	/* get normal page sizes: */
-	page_sz = 4 KB;
-
-	/* read 8 bytes (uint64_t) at position N*8, where N is addr/page_sz */
-	fd = open(PAGEMAP_FILE, O_RDONLY);
-	if (fd < 0) {
-		perror("open()");
-		return PHYS_ADDR_INVALID;
-	}
-
-	offset = ((unsigned long)addr / page_sz) * sizeof(uint64_t);
-	if (lseek(fd, offset, SEEK_SET) == (off_t)-1) {
-		perror("lseek");
-		close(fd);
-		return PHYS_ADDR_INVALID;
-	}
-
-	read_bytes = read(fd, &page, sizeof(uint64_t));
-	close(fd);
-	if (read_bytes < 0) {
-		fprintf(stderr, "cannot read " PAGEMAP_FILE ": %s\n",
-			strerror(errno));
-		return PHYS_ADDR_INVALID;
-	} else if (read_bytes != sizeof(uint64_t)) {
-		fprintf(stderr, "read %d bytes from " PAGEMAP_FILE " "
-			"but expected %d:\n",
-			read_bytes, sizeof(uint64_t));
-		return PHYS_ADDR_INVALID;
-	}
-
-	/* some kernel return PFN zero when permission is denied: */
-	if (!(page & 0x7fffffffffffffULL))
-		return PHYS_ADDR_INVALID;
-
-	/*
-	 * the pfn (page frame number) are bits 0-54 (see
-	 * pagemap.txt in linux Documentation)
-	 */
-	phys_addr = ((page & 0x7fffffffffffffULL) * page_sz)
-		+ ((unsigned long)addr % page_sz);
-
-	return phys_addr;
-}
 
 static int alloc_hugepage(struct hugepage_info *hp)
 {
@@ -482,6 +424,8 @@ void block_free(struct block *block)
 	unlock_list();
 }
 
+#ifdef ENABLE_DEBUG
+
 static void dump_hp_array(struct hugepage_info *hp, int size)
 {
 	while (size--) {
@@ -512,15 +456,14 @@ static void dump_blocks(void)
 	}
 }
 
+#endif /* ENABLE_DEBUG */
+
 static int map_block(struct block *block)
 {
 	void *addr;
 	void *next = NULL;
 	struct hugepage_info *hp;
 	size_t page_size;
-
-	printf("WAAAAAAARN!\n");
-	return 0;
 
 	if (block == NULL)
 		return -1;
@@ -545,7 +488,7 @@ static int map_block(struct block *block)
 	page_size = hp->size;
 	block->va = addr;
 
-	printf("Mapping block %d at %p\n", block->id, block->va);
+	fprintf(stderr, "Mapping block %d at %p\n", block->id, block->va);
 
 	while (hp != NULL) {
 		if (munmap(addr, hp->size) != 0) {
@@ -575,14 +518,16 @@ static int map_block(struct block *block)
 
 		uint64_t pa = get_phys_addr(tmp);
 		if (pa != hp->pa) {
-			printf("Remapping hp %d (fd old: %d) (fd new: %d) "
-			       "failed?\n", hp->fd, fd, *((int *)hp->va));
-			printf("PA orig: 0x%016" PRIx64 "\n"
-			       "PA  new: 0x%016" PRIx64 "\n", hp->pa, pa);
+			fprintf(stderr, "Remapping hp %d (fd old: %d) "
+				"(fd new: %d) failed?\n",
+				hp->fd, fd, *((int *)hp->va));
+			fprintf(stderr, "PA orig: 0x%016" PRIx64 "\n"
+				"PA  new: 0x%016" PRIx64 "\n", hp->pa, pa);
 		}
 
-		printf("\t%03d: VA: 0x%016" PRIx64 " -> 0x%016" PRIx64 ", "
-		       "PA: 0x%016" PRIx64 "\n", hp->fd, hp->va, tmp, hp->pa);
+		fprintf(stderr, "\t%03d: VA: 0x%016" PRIx64 " -> 0x%016" PRIx64
+			", PA: 0x%016" PRIx64 "\n",
+			hp->fd, hp->va, tmp, hp->pa);
 
 		if (munmap(hp->va, page_size) != 0) {
 			munmap(tmp, page_size);
@@ -653,14 +598,11 @@ static int check_va_area(const void *va, uint64_t size, uint64_t page_size)
 
 static void do_atexit(void)
 {
-	int count = 0;
-
 	for (int i = 0; i < MAX_HUGEPAGES; ++i) {
 		if (pages[i].fd == 0)
 			continue;
 		close(pages[i].fd);
 		unlink(pages[i].filename);
-		count++;
 	}
 }
 
@@ -673,11 +615,12 @@ static void init_blocks(void)
 	LIST_INIT(&block_data.empty);
 }
 
-static int hp_init(void)
+int block_module_init(void)
 {
 	init_blocks();
 
-	init_hugepages();
+	if (init_hugepages())
+		return -1;
 
 	atexit(do_atexit);
 
@@ -754,10 +697,12 @@ static void print_block_list(block_list_t *list)
 
 int main(void)
 {
-	if (hp_init() != 0)
+	if (block_module_init() != 0)
 		exit(EXIT_FAILURE);
 
+#ifdef ENABLE_DEBUG
 	dump_blocks();
+#endif
 
 	test_alloc();
 
